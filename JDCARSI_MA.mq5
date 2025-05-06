@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
-//|            DCA_RSI_MA_Relaxed_Trim.mq5                           |
-//|  DCA based on RSI/MA, Trim 1 order when profit > threshold       |
+//|            DCA_RSI_MA_Trim_v3.mq5                                |
+//|   DCA with RSI/MA, TP always, SL after MaxOrders, Trim logic     |
 //+------------------------------------------------------------------+
 #property strict
 #include <Trade\Trade.mqh>
@@ -12,7 +12,7 @@ input double StepUSD = 20.0;
 input double SL_Range = 30.0;
 input double TP_Range = 30.0;
 input double TrimThreshold = 5.0;
-input int    MaxOrders = 4;
+input int    MaxOrders = 3;
 input double LotSize = 0.01;
 
 double last_dca_buy_price = 0.0;
@@ -29,16 +29,17 @@ int OnInit() {
    return(INIT_SUCCEEDED);
 }
 
-void ModifyEachPosition(PositionInfo &positions[], int count, double avg_price, bool isBuy) {
+void ModifyEachPosition(PositionInfo &positions[], int count, double avg_price, bool isBuy, bool set_sl) {
    int stopLevel = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
    double stopDistance = stopLevel * _Point;
    double marketPrice = isBuy ? SymbolInfoDouble(_Symbol, SYMBOL_BID) : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double sl = isBuy ? avg_price - SL_Range : avg_price + SL_Range;
    double tp = isBuy ? avg_price + TP_Range : avg_price - TP_Range;
 
-   if (MathAbs(marketPrice - sl) >= stopDistance && MathAbs(marketPrice - tp) >= stopDistance) {
+   if (MathAbs(marketPrice - tp) >= stopDistance) {
       for (int i = 0; i < count; i++) {
-         trade.PositionModify(positions[i].ticket, sl, tp);
+         double curr_sl = set_sl ? sl : 0.0;
+         trade.PositionModify(positions[i].ticket, curr_sl, tp);
       }
    }
 }
@@ -69,13 +70,10 @@ void TrimOneIfNeeded(PositionInfo &positions[], int &count, double avg_price, bo
 
    if (far_ticket > 0 && trade.PositionClose(far_ticket)) {
       Print("✂️ Trimmed ", (isBuy ? "BUY" : "SELL"), " ticket: ", far_ticket);
-
-      // Shift array and update count
       for (int i = far_index; i < count - 1; i++) {
          positions[i] = positions[i + 1];
       }
       count--;
-
       if (count > 0)
          last_dca_price = positions[count - 1].price;
    }
@@ -101,8 +99,8 @@ void OnTick() {
    double sell_total = 0, sell_volume = 0;
    double buy_avg = 0, sell_avg = 0;
 
-   PositionInfo buy_positions[10];
-   PositionInfo sell_positions[10];
+   PositionInfo buy_positions[3];
+   PositionInfo sell_positions[3];
 
    for (int i = PositionsTotal() - 1; i >= 0; i--) {
       ulong ticket = PositionGetTicket(i);
@@ -136,7 +134,7 @@ void OnTick() {
    // BUY logic
    if (buy_count == 0) {
       if (rsi < 30 && ma_now > ma_prev) {
-         double sl = ask - SL_Range;
+         double sl = 0.0; // không đặt SL ban đầu
          double tp = ask + TP_Range;
          if (trade.Buy(LotSize, _Symbol, ask, sl, tp, "BUY_1")) {
             last_dca_buy_price = ask;
@@ -144,7 +142,7 @@ void OnTick() {
          }
       }
    } else if (buy_count < MaxOrders && ask <= last_dca_buy_price - StepUSD) {
-      double sl = ask - SL_Range;
+      double sl = 0.0;
       double tp = ask + TP_Range;
       if (trade.Buy(LotSize, _Symbol, ask, sl, tp, "BUY_DCA")) {
          last_dca_buy_price = ask;
@@ -155,7 +153,7 @@ void OnTick() {
    // SELL logic
    if (sell_count == 0) {
       if (rsi > 70 && ma_now < ma_prev) {
-         double sl = bid + SL_Range;
+         double sl = 0.0;
          double tp = bid - TP_Range;
          if (trade.Sell(LotSize, _Symbol, bid, sl, tp, "SELL_1")) {
             last_dca_sell_price = bid;
@@ -163,7 +161,7 @@ void OnTick() {
          }
       }
    } else if (sell_count < MaxOrders && bid >= last_dca_sell_price + StepUSD) {
-      double sl = bid + SL_Range;
+      double sl = 0.0;
       double tp = bid - TP_Range;
       if (trade.Sell(LotSize, _Symbol, bid, sl, tp, "SELL_DCA")) {
          last_dca_sell_price = bid;
@@ -171,15 +169,21 @@ void OnTick() {
       }
    }
 
-   if (buy_count > 1) {
-      ModifyEachPosition(buy_positions, buy_count, buy_avg, true);
+   // BUY Management
+   if (buy_count == MaxOrders) {
+      ModifyEachPosition(buy_positions, buy_count, buy_avg, true, true);
       TrimOneIfNeeded(buy_positions, buy_count, buy_avg, true, last_dca_buy_price);
-      ModifyEachPosition(buy_positions, buy_count, buy_avg, true);  // ensure SL/TP updated
+      ModifyEachPosition(buy_positions, buy_count, buy_avg, true, true);
+   } else {
+      ModifyEachPosition(buy_positions, buy_count, buy_avg, true, false);
    }
 
-   if (sell_count > 1) {
-      ModifyEachPosition(sell_positions, sell_count, sell_avg, false);
+   // SELL Management
+   if (sell_count == MaxOrders) {
+      ModifyEachPosition(sell_positions, sell_count, sell_avg, false, true);
       TrimOneIfNeeded(sell_positions, sell_count, sell_avg, false, last_dca_sell_price);
-      ModifyEachPosition(sell_positions, sell_count, sell_avg, false);
+      ModifyEachPosition(sell_positions, sell_count, sell_avg, false, true);
+   } else {
+      ModifyEachPosition(sell_positions, sell_count, sell_avg, false, false);
    }
 }
